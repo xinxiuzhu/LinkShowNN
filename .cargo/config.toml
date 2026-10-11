@@ -1,0 +1,8 @@
+# 安装于 Nuono/plugins/<插件>/ 时，普通 Cargo 构建复用宿主缓存。
+# 相对路径以 .cargo 的父目录（插件根目录）为基准。
+[build]
+target-dir = "../../target"
+incremental = false
+
+[net]
+git-fetch-with-cli = true

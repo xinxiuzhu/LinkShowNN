@@ -22,3 +22,59 @@ rustc-ice-*.txt
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# LinkShowNN local build, runtime and credential files
+.DS_Store
+*.log
+# System metadata
+._*
+.AppleDouble/
+.LSOverride
+__MACOSX/
+.Spotlight-V100/
+.Trashes/
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Build and profiling output
+*.profraw
+*.profdata
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local runtime files
+/logs/
+/data/
+/cache/
+.cache/
+/tmp/
+/nuono.toml
+/config.toml
+
+# Local secrets (keep example templates)
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+!.env.*.example
+!.env.*.sample
+!.env.*.template
+
+# Editor temporary files
+*.swp
+*.swo
+*~
+
+# Local installation metadata
+/.nuono-pin
