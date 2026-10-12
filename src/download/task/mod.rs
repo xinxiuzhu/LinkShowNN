@@ -10,7 +10,10 @@ use tracing::{debug, info, warn};
 
 use crate::delivery;
 use crate::runtime::state::RuntimeState;
-use crate::{download::DownloadReservation, resolver::Resolved};
+use crate::{
+    download::{DownloadReservation, MediaKind},
+    resolver::Resolved,
+};
 
 /// Start downloading immediately, but keep every follow-up behind this card's
 /// confirmed send. Dropping the returned handle closes the gate.
@@ -55,12 +58,17 @@ pub fn schedule(
             })
             .then_some(first);
     };
-    info!(filename = %candidate.filename, has_audio = candidate.audio_url.is_some(),
+    let media_kind = match candidate.kind {
+        MediaKind::Video => "video",
+        MediaKind::Audio => "audio",
+    };
+    info!(filename = %candidate.filename, media_kind,
+        has_separate_audio = candidate.audio_url.is_some(),
         "media download candidate created");
     let reservation = reserve(state)?;
     let filename = candidate.filename.clone();
     let stats = state.clone();
-    info!(filename = %filename, "media download task queued");
+    info!(filename = %filename, media_kind, "media download task queued");
     tasks.try_spawn("media-download", async move {
         let download = async {
             match reservation.download(&candidate).await {
@@ -68,22 +76,27 @@ pub fn schedule(
                     if let Ok(mut state) = stats.lock() {
                         state.metrics.complete();
                     }
-                    info!(filename = %filename, path = %media.path.display(), "media download completed");
+                    info!(filename = %filename, media_kind, path = %media.path.display(), "media download completed");
                     delivery::media_message(&candidate, &media.path, media.thumb.as_deref())
                 }
                 Err(error) => {
                     if let Ok(mut state) = stats.lock() {
                         state.metrics.fail(&error);
                     }
-                    warn!(filename = %filename, error = %error, "background media download failed");
+                    warn!(filename = %filename, media_kind, error = %error, "background media download failed");
                     failure_notice(&error).into()
                 }
             }
         };
-        if let Some(message) = after_card(wait_for_card, download).await
-            && let Err(error) = target.notify(message).await
-        {
-            warn!(filename = %filename, error = %error, "media download result send failed");
+        if let Some(message) = after_card(wait_for_card, download).await {
+            info!(filename = %filename, media_kind,
+                "card send confirmed, dispatching media download result");
+            if let Err(error) = target.notify(message).await {
+                warn!(filename = %filename, media_kind, error = %error, "media download result send failed");
+            }
+        } else {
+            debug!(filename = %filename, media_kind,
+                "media delivery cancelled: card send was not confirmed");
         }
     }).then_some(first)
 }
@@ -155,9 +168,9 @@ fn reserve(state: &Arc<Mutex<RuntimeState>>) -> Option<DownloadReservation> {
 /// 体积超限是配置可调的，单独提示；其余归为通用失败。
 fn failure_notice(error: &anyhow::Error) -> &'static str {
     if error.to_string().contains("exceeds configured size limit") {
-        "视频文件体积超过上限，已放弃发送视频。"
+        "媒体文件体积超过上限，已放弃发送媒体。"
     } else {
-        "视频下载失败，已放弃发送视频。"
+        "媒体下载失败，已放弃发送媒体。"
     }
 }
 

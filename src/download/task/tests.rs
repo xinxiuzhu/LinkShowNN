@@ -266,6 +266,33 @@ async fn finished_download_waits_for_card_receipt_and_preserves_reply_context() 
 }
 
 #[tokio::test]
+async fn ready_mp3_is_sent_as_record_only_after_card_receipt() {
+    let mut rig = Rig::onebot();
+    let (first, wait, target) = rig.request("song-before-record");
+    let (ready, prepared) = oneshot::channel();
+    let completed = rig.followup(target, wait, async move {
+        ready.send(()).unwrap();
+        vec![MessageSegment::record("file:///tmp/song.mp3")].into()
+    });
+    bounded(prepared).await.unwrap();
+    assert!(rig.notifications.try_recv().is_err());
+    let sending = tokio::spawn(first.send(poster()));
+    let call = bounded(rig.calls.recv()).await.unwrap();
+    assert_eq!(call.action["params"]["message"][0]["type"], "image");
+    assert!(rig.notifications.try_recv().is_err());
+    call.receipt.send(Ok(Value::Null)).unwrap();
+    bounded(sending).await.unwrap().unwrap();
+    assert!(bounded(completed).await.unwrap());
+    let sent = bounded(rig.notifications.recv()).await.unwrap();
+    assert_eq!(sent["params"]["message"][0]["type"], "record");
+    assert_eq!(
+        sent["params"]["message"][0]["data"]["file"],
+        "file:///tmp/song.mp3"
+    );
+    rig.tasks.shutdown().await;
+}
+
+#[tokio::test]
 async fn card_receipt_does_not_wait_for_slow_download() {
     let mut rig = Rig::new();
     let (first, wait, target) = rig.request("slow-download");
@@ -323,7 +350,7 @@ async fn dropped_card_handle_discards_ready_video_or_failure_notice() {
     let mut rig = Rig::new();
     for message in [
         video("ready"),
-        SendableMessage::from("视频下载失败，已放弃发送视频。"),
+        SendableMessage::from("媒体下载失败，已放弃发送媒体。"),
     ] {
         let (first, wait, target) = rig.request("dropped-card");
         let (ready, work_ready) = oneshot::channel();
@@ -473,7 +500,10 @@ async fn nested_reply_ids_are_preserved_on_card_and_video() {
 #[test]
 fn size_limit_failure_gets_its_own_notice() {
     let oversize = anyhow::anyhow!("file exceeds configured size limit of 100 MiB");
-    assert!(failure_notice(&oversize).contains("体积超过上限"));
+    assert_eq!(
+        failure_notice(&oversize),
+        "媒体文件体积超过上限，已放弃发送媒体。"
+    );
     let other = anyhow::anyhow!("connection reset by peer");
-    assert!(failure_notice(&other).contains("下载失败"));
+    assert_eq!(failure_notice(&other), "媒体下载失败，已放弃发送媒体。");
 }
