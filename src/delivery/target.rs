@@ -143,7 +143,7 @@ impl ReplyTarget {
             self.bot.call_routed_receipt(&self.target.route, action),
         )
         .await
-        .context("解析卡片发送回执超时")??;
+        .context("消息发送回执超时")??;
         // Native adapters validate their own transport results in the SDK; their
         // legitimate response data can contain keys such as `data` or `status`.
         // Protocol-envelope interpretation below applies only to OneBot.
@@ -164,7 +164,7 @@ impl ReplyTarget {
                         .raw
                         .get("retcode")
                         .is_none_or(|code| code.as_i64() == Some(0))),
-            "解析卡片未返回成功发送回执"
+            "消息未返回成功发送回执"
         );
         Ok(())
     }

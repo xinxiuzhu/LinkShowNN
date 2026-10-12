@@ -31,11 +31,10 @@ impl ResolverConfig {
         serde_json::to_value(Self::default()).unwrap_or_else(|_| serde_json::json!({}))
     }
 
-    /// 媒体落盘目录。配置优先，留空则退到宿主 OneBot 读得到的位置。
+    /// 媒体在宿主进程上的保存目录。配置优先，留空则沿用系统默认目录。
     ///
-    /// 插件自己的 data 目录不是安全默认值：macOS 上 QQ 跑在 App Sandbox 里，
-    /// 除了 `~/Downloads` 这类有内建例外的目录，其余绝对路径都会被 EPERM 拒绝，
-    /// 表现为下载成功但 `send_msg` 报 `EPERM: operation not permitted`。
+    /// 路径展开与规范化由下载器执行；这里不推断 OneBot 的部署位置或读取权限。
+    /// 本地路径传输仅适用于 OneBot 能访问同一文件的同机或共享挂载部署。
     pub fn resolve_media_dir(&self, data_dir: &Path) -> PathBuf {
         match self.media_output_dir.trim() {
             "" => sandbox_readable_dir().unwrap_or_else(|| data_dir.join("media")),
@@ -44,10 +43,9 @@ impl ResolverConfig {
     }
 }
 
-/// 宿主进程沙箱化时仍可读的目录，找不到就返回 `None` 由调用方回退。
+/// macOS 沿用 Downloads 下的保存目录，找不到就返回 `None` 由调用方回退。
 ///
-/// 只在 macOS 生效：Linux 和 Windows 的 OneBot 实现通常不受这类文件系统限制，
-/// 沿用插件 data 目录即可。
+/// 这只是宿主的下载默认值，不保证客户端或远程 OneBot 可以直接读取。
 pub(super) fn sandbox_readable_dir() -> Option<PathBuf> {
     if !cfg!(target_os = "macos") {
         return None;

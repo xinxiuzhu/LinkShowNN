@@ -293,6 +293,207 @@ async fn ready_mp3_is_sent_as_record_only_after_card_receipt() {
 }
 
 #[tokio::test]
+async fn remote_media_waits_for_card_then_for_its_own_receipt_without_local_fallback() {
+    for (kind, accepted) in [(MediaKind::Audio, true), (MediaKind::Video, false)] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("downloaded-media");
+        tokio::fs::write(&path, b"downloaded-media-fixture")
+            .await
+            .unwrap();
+        let media = Downloaded { path, thumb: None };
+        let mut candidate =
+            DownloadCandidate::video("https://cdn.example/media", "fixture", "https://example/");
+        candidate.kind = kind;
+        let mut rig = Rig::onebot();
+        let (first, wait, target) = rig.request("remote-media");
+        let (finished, mut completed) = oneshot::channel();
+        let (ready, downloaded) = oneshot::channel();
+        assert!(rig.tasks.try_spawn("remote-media-test", async move {
+            let work = async {
+                ready.send(()).unwrap();
+                media
+            };
+            let confirmed = if let Some(media) = after_card(wait, work).await {
+                send_media(
+                    &target,
+                    &candidate,
+                    &media,
+                    "base64",
+                    &tokio::sync::Semaphore::new(1),
+                )
+                .await
+                .is_ok()
+            } else {
+                false
+            };
+            let _ = finished.send(confirmed);
+        }));
+        bounded(downloaded).await.unwrap();
+        assert!(rig.calls.try_recv().is_err());
+        let card = tokio::spawn(first.send(poster()));
+        let image = bounded(rig.calls.recv()).await.unwrap();
+        assert_eq!(image.action["params"]["message"][0]["type"], "image");
+        assert!(rig.calls.try_recv().is_err());
+        image.receipt.send(Ok(Value::Null)).unwrap();
+        bounded(card).await.unwrap().unwrap();
+        let call = bounded(rig.calls.recv()).await.unwrap();
+        let segment = &call.action["params"]["message"][0];
+        assert_eq!(
+            segment["type"],
+            if kind == MediaKind::Audio {
+                "record"
+            } else {
+                "video"
+            }
+        );
+        use base64::Engine;
+        let received = base64::engine::general_purpose::STANDARD
+            .decode(
+                segment["data"]["file"]
+                    .as_str()
+                    .unwrap()
+                    .strip_prefix("base64://")
+                    .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(received, b"downloaded-media-fixture");
+        assert!(
+            matches!(
+                completed.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "media must still wait for its own receipt"
+        );
+        if accepted {
+            call.receipt
+                .send(Ok(json!({"message_id":"media-confirmed"})))
+                .unwrap();
+        } else {
+            call.receipt
+                .send(Err(NuonoError::MessageSend(
+                    "fixture upload rejected".into(),
+                )))
+                .unwrap();
+        }
+        assert_eq!(bounded(completed).await.unwrap(), accepted);
+        assert!(
+            rig.calls.try_recv().is_err(),
+            "failed media must not be retried with local paths"
+        );
+        assert!(
+            rig.notifications.try_recv().is_err(),
+            "media must not use fire-and-forget sends"
+        );
+        rig.tasks.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn failed_card_does_not_read_or_send_downloaded_media_contents() {
+    let mut rig = Rig::onebot();
+    let (first, wait, target) = rig.request("card-rejected-before-media-read");
+    // This unavailable file would fail preparation if we read it prematurely.
+    let media = Downloaded {
+        path: "/nonexistent-downloaded-media".into(),
+        thumb: None,
+    };
+    let candidate =
+        DownloadCandidate::video("https://cdn.example/media", "fixture", "https://example/");
+    let (finished, completed) = oneshot::channel();
+    assert!(rig.tasks.try_spawn("rejected-card-media-test", async move {
+        let touched = if let Some(media) = after_card(wait, std::future::ready(media)).await {
+            let _ = send_media(
+                &target,
+                &candidate,
+                &media,
+                "base64",
+                &tokio::sync::Semaphore::new(1),
+            )
+            .await;
+            true
+        } else {
+            false
+        };
+        let _ = finished.send(touched);
+    }));
+    let card = tokio::spawn(first.send(poster()));
+    let image = bounded(rig.calls.recv()).await.unwrap();
+    image
+        .receipt
+        .send(Err(NuonoError::MessageSend(
+            "fixture rejected image".into(),
+        )))
+        .unwrap();
+    assert!(bounded(card).await.unwrap().is_err());
+    assert!(!bounded(completed).await.unwrap());
+    assert!(rig.calls.try_recv().is_err());
+    assert!(rig.notifications.try_recv().is_err());
+    rig.tasks.shutdown().await;
+}
+
+#[tokio::test]
+async fn delivery_slot_is_held_until_receipt_and_acquired_before_reading_the_next_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("first.mp3");
+    tokio::fs::write(&path, b"ID3-first-media").await.unwrap();
+    let mut rig = Rig::onebot();
+    let (_, _, first_target) = rig.request("first-media");
+    let (_, _, second_target) = rig.request("second-media");
+    let slots = Arc::new(tokio::sync::Semaphore::new(1));
+    let first_slots = slots.clone();
+    let first = tokio::spawn(async move {
+        let candidate =
+            DownloadCandidate::audio("https://cdn.example/song", "song.mp3", "https://example/");
+        send_media(
+            &first_target,
+            &candidate,
+            &Downloaded { path, thumb: None },
+            "base64",
+            &first_slots,
+        )
+        .await
+    });
+    let call = bounded(rig.calls.recv()).await.unwrap();
+    assert_eq!(slots.available_permits(), 0);
+    let second_slots = slots.clone();
+    let (entered, started) = oneshot::channel();
+    let (done, mut completed) = oneshot::channel();
+    tokio::spawn(async move {
+        let candidate =
+            DownloadCandidate::audio("https://cdn.example/song", "song.mp3", "https://example/");
+        entered.send(()).unwrap();
+        let result = send_media(
+            &second_target,
+            &candidate,
+            &Downloaded {
+                path: "/nonexistent-second-media".into(),
+                thumb: None,
+            },
+            "base64",
+            &second_slots,
+        )
+        .await;
+        done.send(result).unwrap();
+    });
+    bounded(started).await.unwrap();
+    assert!(
+        matches!(
+            completed.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "next file must not be read while the prior media still awaits its receipt"
+    );
+    assert!(rig.calls.try_recv().is_err());
+    call.receipt.send(Ok(Value::Null)).unwrap();
+    bounded(first).await.unwrap().unwrap();
+    assert!(bounded(completed).await.unwrap().is_err());
+    assert_eq!(slots.available_permits(), 1);
+    assert!(rig.calls.try_recv().is_err());
+    assert!(rig.notifications.try_recv().is_err());
+    rig.tasks.shutdown().await;
+}
+
+#[tokio::test]
 async fn card_receipt_does_not_wait_for_slow_download() {
     let mut rig = Rig::new();
     let (first, wait, target) = rig.request("slow-download");

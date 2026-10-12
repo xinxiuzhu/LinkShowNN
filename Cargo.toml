@@ -25,6 +25,7 @@ anyhow = "1"
 aes = "0.8"
 ab_glyph = "0.2"
 async-trait = "0.1"
+base64 = "0.22"
 bpi-rs = { version = "0.3.0", default-features = false, features = ["article", "bangumi", "dynamic", "fav", "live", "login", "opus", "video"] }
 futures-util = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["std"] }

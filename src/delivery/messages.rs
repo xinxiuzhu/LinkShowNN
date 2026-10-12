@@ -1,11 +1,9 @@
 //! 图文卡片、渲染图片和音视频的消息构造。
 
-use std::path::Path;
-
 use nuono_plugin::{ImageSource, MessageSegment, PluginResponse, SendableMessage};
 use serde_json::json;
 
-use crate::{download::DownloadCandidate, download::MediaKind, resolver::Card};
+use crate::resolver::Card;
 
 pub fn card_message(card: &Card) -> Vec<MessageSegment> {
     let mut segments = Vec::new();
@@ -47,27 +45,6 @@ pub fn reply_message(message: SendableMessage) -> PluginResponse {
     }))
 }
 
-pub fn media_message(
-    candidate: &DownloadCandidate,
-    path: &Path,
-    thumb: Option<&Path>,
-) -> SendableMessage {
-    let file = format!("file://{}", path.display());
-    let segment = match candidate.kind {
-        MediaKind::Video => MessageSegment::video(file),
-        MediaKind::Audio => MessageSegment::record(file),
-    };
-    let mut encoded = segment.to_json();
-    // SDK 的视频段尚无 thumb 字段；仅在投递处保留 OneBot 的缩略图扩展。
-    // 缩略图必须是下载后的本地文件，不把需要 Referer 的封面 URL 交给平台。
-    if candidate.kind == MediaKind::Video
-        && let Some(thumb) = thumb
-    {
-        encoded["data"]["thumb"] = json!(format!("file://{}", thumb.display()));
-    }
-    SendableMessage::Json(json!([encoded]).to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,34 +70,5 @@ mod tests {
         .to_json();
         assert_eq!(encoded.as_array().unwrap().len(), 1);
         assert_eq!(encoded[0]["type"], "image");
-    }
-
-    #[test]
-    fn video_thumb_is_a_local_file_uri_and_never_named_cover() {
-        let video = DownloadCandidate::video("https://cdn.example/v.mp4", "v.mp4", "https://e/");
-        let segment = media_message(
-            &video,
-            Path::new("/tmp/v.mp4"),
-            Some(Path::new("/tmp/c.jpg")),
-        )
-        .to_json();
-        assert_eq!(segment[0]["data"]["thumb"], "file:///tmp/c.jpg");
-        assert!(segment[0]["data"].get("cover").is_none());
-    }
-
-    #[test]
-    fn audio_and_video_without_thumb_omit_the_extension() {
-        let audio = DownloadCandidate::audio("https://cdn.example/a.mp3", "a.mp3", "https://e/");
-        let segment = media_message(
-            &audio,
-            Path::new("/tmp/a.mp3"),
-            Some(Path::new("/tmp/c.jpg")),
-        )
-        .to_json();
-        assert_eq!(segment[0]["type"], "record");
-        assert!(segment[0]["data"].get("thumb").is_none());
-        let video = DownloadCandidate::video("https://cdn.example/v.mp4", "v.mp4", "https://e/");
-        let segment = media_message(&video, Path::new("/tmp/v.mp4"), None).to_json();
-        assert!(segment[0]["data"].get("thumb").is_none());
     }
 }

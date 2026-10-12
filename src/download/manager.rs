@@ -387,9 +387,49 @@ fn absolute_dir(dir: PathBuf) -> Result<PathBuf> {
     if dir.is_absolute() {
         return Ok(dir);
     }
+    let home = std::env::var_os("HOME")
+        .or_else(|| {
+            if cfg!(target_os = "windows") {
+                std::env::var_os("USERPROFILE")
+            } else {
+                None
+            }
+        })
+        .map(PathBuf::from);
+    if matches!(dir.components().next(), Some(Component::Normal(name)) if name.to_string_lossy().starts_with('~'))
+    {
+        return resolve_media_path(&dir, Path::new(""), home.as_deref());
+    }
     let base = std::env::current_dir().context("failed to resolve current directory")?;
-    let mut resolved = base;
-    for part in dir.components() {
+    resolve_media_path(&dir, &base, home.as_deref())
+}
+
+/// Expand only the current user's home marker and normalize without requiring
+/// the output directory to exist. Explicit inputs keep tests independent of HOME.
+fn resolve_media_path(dir: &Path, base: &Path, home: Option<&Path>) -> Result<PathBuf> {
+    let mut parts = dir.components();
+    let expanded = match parts.next() {
+        Some(Component::Normal(name)) if name == "~" => {
+            let home =
+                home.context("media directory uses '~' but home directory is unavailable")?;
+            if !home.is_absolute() {
+                bail!("media home directory must be an absolute path");
+            }
+            home.join(parts.as_path())
+        }
+        Some(Component::Normal(name)) if name.to_string_lossy().starts_with('~') => {
+            bail!("media directory supports '~/' but not '~user' paths");
+        }
+        _ => dir.to_path_buf(),
+    };
+    // Preserve absolute paths: removing `..` lexically changes their meaning
+    // when a preceding component is a symbolic link.
+    if expanded.is_absolute() {
+        return Ok(expanded);
+    }
+    let rooted = base.join(expanded);
+    let mut resolved = PathBuf::new();
+    for part in rooted.components() {
         match part {
             Component::CurDir => {}
             Component::ParentDir => {
@@ -399,6 +439,9 @@ fn absolute_dir(dir: PathBuf) -> Result<PathBuf> {
             }
             other => resolved.push(other),
         }
+    }
+    if !resolved.is_absolute() {
+        bail!("media directory must resolve to an absolute path");
     }
     Ok(resolved)
 }
@@ -424,8 +467,8 @@ fn unique_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{DownloadManager, PendingFile, absolute_dir, sanitize_name};
-    use std::path::PathBuf;
+    use super::{DownloadManager, PendingFile, absolute_dir, resolve_media_path, sanitize_name};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn sanitizes_download_names() {
@@ -444,6 +487,78 @@ mod tests {
 
         let absolute = PathBuf::from("/tmp/nuono-media");
         assert_eq!(absolute_dir(absolute.clone()).unwrap(), absolute);
+    }
+
+    #[test]
+    fn expands_current_home_before_resolving_the_media_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("Nuono");
+        let home = root.path().join("home");
+        assert_eq!(
+            resolve_media_path(Path::new("~/Downloads/LinkShowNN"), &base, Some(&home)).unwrap(),
+            home.join("Downloads/LinkShowNN")
+        );
+        assert_eq!(
+            resolve_media_path(Path::new("~"), &base, Some(&home)).unwrap(),
+            home
+        );
+    }
+
+    #[test]
+    fn rejects_missing_home_and_other_users_instead_of_creating_literal_tilde_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path();
+        let missing = resolve_media_path(Path::new("~/Downloads"), base, None).unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("home directory is unavailable")
+        );
+        for input in ["~another/Downloads", "~another", "~Downloads"] {
+            let error = resolve_media_path(Path::new(input), base, Some(base)).unwrap_err();
+            assert!(error.to_string().contains("not '~user'"));
+        }
+        assert!(
+            resolve_media_path(Path::new("~/Downloads"), base, Some(Path::new("home"))).is_err()
+        );
+    }
+
+    #[test]
+    fn preserves_absolute_paths_and_resolves_relative_directories_without_existing_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().join("Nuono");
+        assert_eq!(
+            resolve_media_path(Path::new("./data/../media"), &base, None).unwrap(),
+            base.join("media")
+        );
+        let absolute = root.path().join("downloads/./old/../LinkShowNN");
+        assert_eq!(
+            resolve_media_path(&absolute, &base, None).unwrap(),
+            absolute
+        );
+        let filesystem_root = root.path().ancestors().last().unwrap();
+        assert!(resolve_media_path(Path::new(".."), filesystem_root, None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_and_home_paths_preserve_parent_components_after_symlinks() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target/child");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let configured = link.join("../media");
+        let resolved = resolve_media_path(&configured, Path::new(""), None).unwrap();
+        assert_eq!(resolved, configured);
+        std::fs::create_dir_all(&resolved).unwrap();
+        assert!(root.path().join("target/media").is_dir());
+        assert!(!root.path().join("media").exists());
+        let home_resolved =
+            resolve_media_path(Path::new("~/../other"), Path::new(""), Some(&link)).unwrap();
+        std::fs::create_dir_all(home_resolved).unwrap();
+        assert!(root.path().join("target/other").is_dir());
+        assert!(!root.path().join("other").exists());
     }
 
     #[test]

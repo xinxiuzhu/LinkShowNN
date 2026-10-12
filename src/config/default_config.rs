@@ -92,9 +92,23 @@ pub struct ResolverConfig {
     pub enable_media_download: bool,
 
     #[config(
+        default = "base64",
+        label = "媒体传输方式",
+        description = "直接传内容无需共享目录；内嵌媒体与缩略图合计上限 64 MiB。大文件可选择本地路径，但 OneBot 必须能读取同一文件路径",
+        section = "媒体下载",
+        widget = "select",
+        options = [
+            ("直接传内容（无需共享目录）", "base64"),
+            ("本地路径（同机或共享挂载）", "local"),
+        ],
+        visible_when(key = "enable_media_download", value = true)
+    )]
+    pub media_transport: String,
+
+    #[config(
         default = "",
         label = "媒体输出目录",
-        description = "留空自动选宿主 OneBot 读得到的目录（macOS 为 ~/Downloads/LinkShowNN）；OneBot 在容器或别的机器上时，填一个它也能读到的绝对路径",
+        description = "宿主保存下载媒体的目录；支持绝对路径、相对路径和 ~/ 展开。留空时 macOS 使用 Downloads/LinkShowNN，其他系统使用插件数据目录；此设置不提供跨机器文件共享",
         section = "媒体下载",
         visible_when(key = "enable_media_download", value = true)
     )]

@@ -31,6 +31,8 @@ pub struct RuntimeState {
     pub metrics: Metrics,
     pub tasks: Option<Arc<PluginTaskScope>>,
     pub downloads: Option<DownloadManager>,
+    /// Cover media encoding through the platform receipt; ready files wait on disk.
+    pub(crate) media_delivery_slots: Option<Arc<tokio::sync::Semaphore>>,
     pub live: Option<LiveStore>,
     pub live_poller: LivePoller,
     pub host_bot: Option<Arc<Bot>>,

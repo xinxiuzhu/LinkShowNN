@@ -160,6 +160,7 @@ impl Plugin for LinkShowNN {
             state.parser = Some(parser);
             state.renderer = renderer;
             state.downloads = Some(downloads);
+            state.media_delivery_slots = Some(Arc::new(Semaphore::new(1)));
             state.live = Some(live);
             state.host_bot = ctx.bot.clone();
             state.tasks = Some(ctx.tasks.clone());

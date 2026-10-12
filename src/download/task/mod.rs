@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use crate::delivery;
 use crate::runtime::state::RuntimeState;
 use crate::{
-    download::{DownloadReservation, MediaKind},
+    download::{DownloadCandidate, DownloadReservation, Downloaded, MediaKind},
     resolver::Resolved,
 };
 
@@ -22,10 +22,12 @@ pub fn schedule(
     event: &Event<'_>,
     resolved: &Resolved,
 ) -> Option<CardFirst> {
-    let (maximum_duration, bot, tasks) = {
+    let (maximum_duration, transport, delivery_slots, bot, tasks) = {
         let state = state.lock().ok()?;
         (
             state.config.video_duration_maximum,
+            state.config.media_transport.clone(),
+            state.media_delivery_slots.clone()?,
             state.host_bot.clone()?,
             state.tasks.clone()?,
         )
@@ -77,28 +79,62 @@ pub fn schedule(
                         state.metrics.complete();
                     }
                     info!(filename = %filename, media_kind, path = %media.path.display(), "media download completed");
-                    delivery::media_message(&candidate, &media.path, media.thumb.as_deref())
+                    Ok(media)
                 }
                 Err(error) => {
                     if let Ok(mut state) = stats.lock() {
                         state.metrics.fail(&error);
                     }
                     warn!(filename = %filename, media_kind, error = %error, "background media download failed");
-                    failure_notice(&error).into()
+                    Err(error)
                 }
             }
         };
-        if let Some(message) = after_card(wait_for_card, download).await {
-            info!(filename = %filename, media_kind,
+        if let Some(result) = after_card(wait_for_card, download).await {
+            info!(filename = %filename, media_kind, media_transport = %transport,
                 "card send confirmed, dispatching media download result");
-            if let Err(error) = target.notify(message).await {
-                warn!(filename = %filename, media_kind, error = %error, "media download result send failed");
+            // Encode only after the card is confirmed: completed downloads wait
+            // on disk, without retaining large Base64 strings behind the gate.
+            let sent = match result {
+                Ok(media) => send_media(&target, &candidate, &media, &transport, &delivery_slots).await,
+                Err(error) => target.send_confirmed(failure_notice(&error).into()).await,
+            };
+            match sent {
+                Ok(()) => info!(filename = %filename, media_kind, "media download result send confirmed"),
+                Err(error) => {
+                    warn!(filename = %filename, media_kind, error = %error, "media download result send failed");
+                    if error.to_string().contains("delivery budget") {
+                        let notice = "媒体与缩略图超过 64 MiB 内容传输上限，已放弃发送。大文件可选择本地路径传输，并确保 OneBot 能读取共享目录。";
+                        if let Err(error) = target.send_confirmed(notice.into()).await {
+                            warn!(error = %error, "media delivery limit notice send failed");
+                        }
+                    }
+                }
             }
         } else {
             debug!(filename = %filename, media_kind,
                 "media delivery cancelled: card send was not confirmed");
         }
     }).then_some(first)
+}
+
+/// The same receipt-bearing path handles video and MP3 voice. Unknown outcomes
+/// are errors and never trigger a second media send or a local-path fallback.
+async fn send_media(
+    target: &delivery::ReplyTarget,
+    candidate: &DownloadCandidate,
+    media: &Downloaded,
+    transport: &str,
+    delivery_slots: &tokio::sync::Semaphore,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let _permit = delivery_slots
+        .acquire()
+        .await
+        .context("media delivery scope closed")?;
+    let message =
+        delivery::media_message(candidate, &media.path, media.thumb.as_deref(), transport).await?;
+    target.send_confirmed(message).await
 }
 
 pub struct CardFirst {

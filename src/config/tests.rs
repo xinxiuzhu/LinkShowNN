@@ -115,6 +115,8 @@ fn explicit_invalid_values_do_not_fall_back_to_defaults() {
         json!({"concurrent_limit": null}),
         json!({"blacklist_users": "not a JSON array"}),
         json!({"blacklist_users": [1]}),
+        json!({"media_transport": null}),
+        json!({"media_transport": "remote"}),
     ] {
         assert!(ResolverConfig::load(input.clone()).is_err(), "{input}");
     }
@@ -225,6 +227,39 @@ fn media_output_dir_defaults_to_empty_and_accepts_override() {
 }
 
 #[test]
+fn media_transport_defaults_to_content_and_allows_explicit_shared_paths() {
+    let old = ResolverConfig::load(json!({
+        "enable_media_download": true,
+        "media_output_dir": "~/Downloads/LinkShowNN",
+    }))
+    .unwrap();
+    assert_eq!(old.media_transport, "base64");
+    assert_eq!(old.media_output_dir, "~/Downloads/LinkShowNN");
+    let local = ResolverConfig::load(json!({"media_transport": "local"})).unwrap();
+    assert_eq!(local.media_transport, "local");
+
+    let field = ResolverConfig::get_schema()
+        .into_iter()
+        .find(|field| field.key == "media_transport")
+        .unwrap();
+    assert_eq!(field.field_type, nuono_plugin::ConfigFieldType::Select);
+    assert_eq!(field.section.as_deref(), Some("媒体下载"));
+    assert_eq!(
+        field
+            .options
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|option| option.value.as_str())
+            .collect::<Vec<_>>(),
+        ["base64", "local"]
+    );
+    let condition = field.ui.visible_when.unwrap();
+    assert_eq!(condition.key, "enable_media_download");
+    assert_eq!(condition.value, json!(true));
+}
+
+#[test]
 fn configured_media_dir_wins_over_sandbox_fallback() {
     let config = ResolverConfig {
         media_output_dir: "  /srv/onebot/shared  ".into(),
@@ -238,7 +273,7 @@ fn configured_media_dir_wins_over_sandbox_fallback() {
 
 #[test]
 fn empty_media_dir_avoids_plugin_data_dir_when_sandbox_dir_exists() {
-    // macOS 上 QQ 的沙箱读不到插件 data 目录，所以留空时不能退到那里。
+    // 保存目录只沿用宿主的默认位置，不代表 OneBot 具有同一文件命名空间。
     let resolved = ResolverConfig::default().resolve_media_dir(Path::new("/plugin/data"));
     match sandbox_readable_dir() {
         Some(expected) => assert_eq!(resolved, expected),
