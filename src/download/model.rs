@@ -3,6 +3,15 @@
 //! 平台不碰并发、临时文件和 FFmpeg，只描述地址、文件名和访问该 CDN 需要的
 //! Referer。
 
+use std::path::PathBuf;
+
+/// 下载产物：媒体本体，加上尽力而为的本地缩略图。
+#[derive(Debug, Clone)]
+pub struct Downloaded {
+    pub path: PathBuf,
+    pub thumb: Option<PathBuf>,
+}
+
 /// 下载媒体的业务种类；消息协议编码由投递模块负责。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaKind {
@@ -14,6 +23,8 @@ pub enum MediaKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadCandidate {
     pub url: String,
+    /// 同一媒体的备用源；下载失败才按顺序尝试，最多保留两条。
+    pub fallback_urls: Vec<String>,
     /// DASH 分流时的音轨地址，存在则需要与视频合并。
     pub audio_url: Option<String>,
     pub filename: String,
@@ -32,6 +43,7 @@ impl DownloadCandidate {
     ) -> Self {
         Self {
             url: url.into(),
+            fallback_urls: Vec::new(),
             audio_url: None,
             filename: filename.into(),
             kind: MediaKind::Video,
@@ -55,6 +67,25 @@ impl DownloadCandidate {
     /// 声明音轨分离，下载后需要封装成单文件。
     pub fn with_audio(mut self, audio_url: impl Into<String>) -> Self {
         self.audio_url = Some(audio_url.into());
+        self
+    }
+
+    /// 备用地址不改变媒体类型、音轨或来源站点；空白与重复地址不占尝试预算。
+    pub fn with_fallback_urls(mut self, urls: impl IntoIterator<Item = String>) -> Self {
+        self.fallback_urls.clear();
+        for url in urls {
+            let url = url.trim();
+            if url.is_empty()
+                || url == self.url.trim()
+                || self.fallback_urls.iter().any(|existing| existing == url)
+            {
+                continue;
+            }
+            self.fallback_urls.push(url.to_owned());
+            if self.fallback_urls.len() == 2 {
+                break;
+            }
+        }
         self
     }
 
@@ -115,5 +146,31 @@ mod tests {
         .message();
         assert!(message.contains("900"));
         assert!(message.contains("480"));
+    }
+
+    #[test]
+    fn fallback_sources_are_bounded_unique_and_exclude_the_primary() {
+        let candidate =
+            DownloadCandidate::video("https://cdn.example/main.mp4", "v.mp4", "https://e/")
+                .with_fallback_urls([
+                    "  ".to_owned(),
+                    "https://cdn.example/main.mp4".to_owned(),
+                    " https://cdn.example/backup.mp4 ".to_owned(),
+                    "https://cdn.example/backup.mp4".to_owned(),
+                    "https://cdn.example/last.mp4".to_owned(),
+                    "https://cdn.example/unused.mp4".to_owned(),
+                ]);
+        assert_eq!(
+            candidate.fallback_urls,
+            [
+                "https://cdn.example/backup.mp4",
+                "https://cdn.example/last.mp4",
+            ]
+        );
+        assert!(
+            DownloadCandidate::audio("https://cdn.example/song.mp3", "a.mp3", "https://e/")
+                .fallback_urls
+                .is_empty()
+        );
     }
 }

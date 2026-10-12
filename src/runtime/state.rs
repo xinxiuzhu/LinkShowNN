@@ -13,7 +13,8 @@ use anyhow::Result;
 use nuono_plugin::prelude::*;
 
 use crate::{
-    default_config::ResolverConfig,
+    auth::{BilibiliLogin, music::MusicLogin},
+    config::ResolverConfig,
     download::DownloadManager,
     live::{LivePoller, LiveStore},
     render::CardRenderer,
@@ -33,6 +34,10 @@ pub struct RuntimeState {
     pub live: Option<LiveStore>,
     pub live_poller: LivePoller,
     pub host_bot: Option<Arc<Bot>>,
+    pub(crate) bili_login: Option<Arc<BilibiliLogin>>,
+    pub(crate) ncm_login: Option<Arc<MusicLogin>>,
+    pub(crate) qqmusic_login: Option<Arc<MusicLogin>>,
+    pub(crate) auth_mutations: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// 在锁内跑一个同步闭包并放锁。

@@ -1,9 +1,11 @@
 //! 多站点链接解析插件。配置在插件加载时取快照，修改后重新加载生效。
 //!
-//! resolver 负责站点解析，download 负责媒体任务，live 负责直播订阅；
-//! delivery 统一生成消息，runtime 编排消息处理，plugin 装配宿主资源。
+//! 每个业务模块对应一个目录：plugin 装配宿主资源，config 声明配置；
+//! resolver 解析各平台，render 生成卡片，download 下载媒体，delivery 发送消息；
+//! live 管直播订阅，runtime 编排处理流程。目录职责见 docs/STRUCTURE.md。
 
-mod default_config;
+mod auth;
+mod config;
 mod delivery;
 mod download;
 mod live;

@@ -15,7 +15,7 @@ use tracing::warn;
 
 use super::{gate, state, state::RuntimeState};
 use crate::{
-    default_config::ResolverConfig, resolver::ParserManager, resolver::Platform,
+    config::ResolverConfig, resolver::ParserManager, resolver::Platform,
     resolver::url_policy as url_guard,
 };
 use crate::{delivery, download::task as download_task};
@@ -83,7 +83,11 @@ pub async fn run(
                 error = %error,
                 "URL resolver failed"
             );
-            return Ok(event.reply_text("未能从此链接解析到可用内容。"));
+            return Ok(event.reply_text(if matched.platform == Platform::Douyin {
+                "此抖音链接暂时无法解析：未读取到可用的公开作品内容，可能存在平台验证或页面兼容限制。"
+            } else {
+                "未能从此链接解析到可用内容。"
+            }));
         }
     };
 
@@ -98,6 +102,46 @@ pub async fn run(
         .then(|| download_task::schedule(state, event, &resolved))
         .flatten();
     let card = resolved.card();
+    if card.is_gallery() {
+        let host = state::with(state, |state| {
+            state.host_bot.clone().zip(state.tasks.clone())
+        })?;
+        let Some((bot, tasks)) = host else {
+            // No host route is available: retain useful text without handing
+            // credential-sensitive picture URLs to an unrelated client.
+            return finish(delivery::gallery_text(&card).into(), first).await;
+        };
+        let target = delivery::ReplyTarget::new(bot, event)?;
+        let gallery =
+            crate::download::gallery::prepare(card.clone(), &config.proxy, tasks.clone()).await;
+        if tasks.is_closed() {
+            return Ok(PluginResponse::Continue);
+        }
+        let sent = match gallery {
+            Ok(gallery) => match first {
+                Some(first) => first.send_gallery(gallery).await,
+                None => {
+                    delivery::send_scoped(target, tasks, delivery::PreparedReply::Gallery(gallery))
+                        .await
+                }
+            },
+            Err(error) => {
+                warn!(platform = matched.platform.as_str(), error = %error, "图集原图获取失败");
+                // Do not release a video when the gallery could not be prepared.
+                drop(first);
+                let text = format!(
+                    "{}\n原图获取失败，请查看原链接。",
+                    delivery::gallery_text(&card)
+                );
+                delivery::send_scoped(target, tasks, delivery::PreparedReply::Message(text.into()))
+                    .await
+            }
+        };
+        if let Err(error) = sent {
+            warn!(platform = matched.platform.as_str(), error = %error, "图集发送未确认，取消后续媒体发送");
+        }
+        return Ok(PluginResponse::Stop);
+    }
     let renderer = state::with(state, |state| state.renderer.clone())?;
     if let Some(renderer) = renderer {
         let response = async {

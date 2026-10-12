@@ -42,11 +42,17 @@ pub struct CardStatsDisplay {
     pub shares: Option<String>,
 }
 
-/// 视频海报的结构化内容。统计缺失时保持为空，不将未知值显示成零。
+/// 封面海报的结构化内容，供视频和歌曲共用。统计缺失时保持为空。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CardPoster {
+    /// 海报主视觉；歌曲使用专辑封面，不将音频标记成视频。
+    pub cover_url: Option<String>,
     pub title: String,
     pub description: Option<String>,
+    /// 当前选中源的档位；只有请求档位可知时显式标注“请求”。
+    pub video_quality: Option<String>,
+    /// 本次权限、可用档位或尺寸缺失的说明，不推断全平台匿名上限。
+    pub quality_notice: Option<String>,
     pub content_id: Option<String>,
     pub author_id: Option<String>,
     pub view_count: Option<u64>,
@@ -61,6 +67,14 @@ pub struct CardPoster {
 
 /// 渲染所需的展示信息。缺失字段保持为空，不用抓取时间替代发布时间。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CardPublicDetails {
+    pub author_followers_display: Option<String>,
+    pub author_likes_display: Option<String>,
+    pub suggested_search: Option<String>,
+}
+
+/// 渲染与文字投递使用相同的公开作品信息。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CardMetadata {
     pub platform: Option<Platform>,
     pub author: Option<String>,
@@ -68,12 +82,17 @@ pub struct CardMetadata {
     /// Unix 时间戳，单位秒。
     pub published_at: Option<i64>,
     pub source_url: Option<String>,
+    /// 用户发送的原始分享链接，供二维码使用；保留短链与分享参数。
+    pub original_url: Option<String>,
     /// 视频封面：海报主视觉；普通图文布局仅这张图叠加播放标记。
     pub video_cover_url: Option<String>,
-    /// 视频可用封面海报排版；原文仍由 Card 保留以供过滤和发送回退。
+    /// 视频和歌曲可用封面海报排版；原文仍由 Card 保留以供过滤和发送回退。
     pub poster: Option<CardPoster>,
     /// 当前匿名可见候选中按赞降序取至多三条；取不到时为空。
     pub comments: Vec<CardComment>,
+    pub public_details: CardPublicDetails,
+    /// 原作品是图集；单张图集也使用原图投递，而视频封面仍走海报。
+    pub gallery: bool,
 }
 
 /// 卡片里的一张图。附带来源说明便于日志定位。
@@ -111,6 +130,36 @@ impl Card {
 
     pub fn metadata(&self) -> &CardMetadata {
         &self.metadata
+    }
+
+    pub fn poster_cover_url(&self) -> Option<&str> {
+        self.metadata
+            .poster
+            .as_ref()
+            .and_then(|poster| poster.cover_url.as_deref())
+            .or(self.metadata.video_cover_url.as_deref())
+    }
+
+    pub fn with_original_url(mut self, source: impl Into<String>) -> Self {
+        self.metadata.original_url = Some(source.into());
+        self
+    }
+
+    pub fn with_comments_visible(mut self, enabled: bool) -> Self {
+        if !enabled {
+            self.metadata.comments.clear();
+        }
+        self
+    }
+
+    pub fn is_gallery(&self) -> bool {
+        self.metadata.gallery
+            || (self.images.len() > 1
+                && self
+                    .metadata
+                    .video_cover_url
+                    .as_ref()
+                    .is_none_or(|cover| self.images.iter().any(|image| &image.url != cover)))
     }
 
     /// 追加一段正文。空白内容自动忽略，省掉每个平台各写一遍 `is_empty` 判断。
@@ -157,12 +206,13 @@ impl Card {
 
     /// 用换行拼成单段文本，供协议编码和过滤复用。
     pub fn text(&self) -> String {
-        self.lines.join("\n")
+        self.append_quality_details(self.lines.join("\n"))
     }
 
     /// 图片正文不重复附加来源链接；文本回退仍由 `text()` 完整保留。
     pub fn body_text(&self) -> String {
-        self.lines
+        let body = self
+            .lines
             .iter()
             .flat_map(|line| line.split('\n'))
             .filter(|line| {
@@ -172,7 +222,30 @@ impl Card {
                     .is_none_or(|source| line.trim() != source.trim())
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        self.append_quality_details(body)
+    }
+
+    fn append_quality_details(&self, mut text: String) -> String {
+        if let Some(poster) = &self.metadata.poster {
+            for line in [
+                poster
+                    .video_quality
+                    .as_ref()
+                    .map(|value| format!("清晰度：{value}")),
+                poster.quality_notice.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .filter(|line| !line.trim().is_empty())
+            {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str(&line);
+            }
+        }
+        text
     }
 }
 

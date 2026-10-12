@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use crate::{default_config::ResolverConfig, resolver::Platform};
+use crate::{config::ResolverConfig, resolver::Platform};
 
 /// 拒绝原因。调用方据此决定是静默丢弃还是计入屏蔽统计。
 #[derive(Debug, Clone, PartialEq, Eq)]

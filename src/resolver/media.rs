@@ -16,6 +16,9 @@ pub struct MediaInfo {
     pub description: Option<String>,
     pub cover_url: Option<String>,
     pub video_url: Option<String>,
+    /// 同一作品的视频备用源，按平台顺序尝试，不包含图集音轨。
+    #[serde(default)]
+    pub video_fallback_urls: Vec<String>,
     pub audio_url: Option<String>,
     pub images: Vec<String>,
     pub author: Option<String>,
@@ -27,6 +30,10 @@ pub struct MediaInfo {
     /// 即使暂时取不到播放地址，视频作品也可以生成封面海报。
     #[serde(default)]
     pub is_video: bool,
+    #[serde(default)]
+    pub video_quality: Option<String>,
+    #[serde(default)]
+    pub quality_notice: Option<String>,
     pub source_url: String,
     /// 解析出该媒体的平台，下载阶段据此决定 CDN Referer。
     pub platform: Platform,
@@ -48,19 +55,30 @@ impl ResolvedContent for MediaInfo {
             .title
             .clone()
             .unwrap_or_else(|| "链接解析结果".to_string());
-        let video_cover_url = (self.is_video || self.video_url.is_some())
+        let is_song = matches!(self.platform, Platform::Ncm | Platform::QqMusic);
+        let cover_url = (self.is_video || self.video_url.is_some() || is_song)
             .then(|| self.cover_url.clone().filter(|url| !url.trim().is_empty()))
+            .flatten();
+        let video_cover_url = (self.is_video || self.video_url.is_some())
+            .then(|| cover_url.clone())
             .flatten();
         // 图集仍按多图布局完整显示，不因同时含视频标志而只留下封面。
         let has_only_cover = self
             .images
             .iter()
-            .all(|url| Some(url.as_str()) == video_cover_url.as_deref());
-        let poster = (video_cover_url.is_some() && has_only_cover).then(|| CardPoster {
-            title: title.clone(),
-            description: description.clone(),
-            ..Default::default()
-        });
+            .all(|url| Some(url.as_str()) == cover_url.as_deref());
+        let has_quality_details = self.video_quality.is_some() || self.quality_notice.is_some();
+        let poster = ((cover_url.is_some() || self.is_video && has_quality_details)
+            && has_only_cover)
+            .then(|| CardPoster {
+                cover_url,
+                title: title.clone(),
+                description: description.clone(),
+                video_quality: self.video_quality.clone(),
+                quality_notice: self.quality_notice.clone(),
+                ..Default::default()
+            });
+        let gallery = !self.images.is_empty() && (!(self.is_video || is_song) || !has_only_cover);
         let card = Card::new()
             .with_metadata(CardMetadata {
                 platform: Some(self.platform),
@@ -68,18 +86,21 @@ impl ResolvedContent for MediaInfo {
                 avatar_url: self.avatar_url.clone(),
                 published_at: self.published_at,
                 source_url: (!self.source_url.is_empty()).then(|| self.source_url.clone()),
+                original_url: None,
                 video_cover_url,
                 poster,
                 comments: Vec::new(),
+                gallery,
+                public_details: Default::default(),
             })
             .line(title)
             .line_opt(description)
             .line(self.source_url.clone());
 
-        // 封面若已在图集里，跳过以免同一张图发两次。
-        let cover = self
-            .cover_url
-            .clone()
+        // 图集仅投递其原图，不把独立 API 封面算进三张/八张规则。
+        let cover = (!gallery)
+            .then(|| self.cover_url.clone())
+            .flatten()
             .filter(|url| !self.images.iter().any(|image| image == url));
         // Card 保留完整内容，渲染/投递层按各自预算截断并说明省略部分。
         card.image_opt(cover).images(self.images.iter().cloned())
@@ -98,6 +119,7 @@ impl ResolvedContent for MediaInfo {
         if let Some(url) = self.video_url.as_deref() {
             return Some(
                 DownloadCandidate::video(url, "linkshownn_video.mp4", referer)
+                    .with_fallback_urls(self.video_fallback_urls.clone())
                     .with_cover(self.cover_url.clone()),
             );
         }
@@ -112,6 +134,25 @@ mod tests {
     use super::MediaInfo;
     use crate::download::model::MediaKind;
     use crate::resolver::{Platform, ResolvedContent};
+
+    #[test]
+    fn platform_video_backups_reach_the_download_candidate() {
+        let media = MediaInfo {
+            video_url: Some("https://www.iesdouyin.com/aweme/v1/play/?video_id=real".into()),
+            video_fallback_urls: vec![
+                "https://v26.douyinvod.com/first.mp4".into(),
+                "https://v26.douyinvod.com/second.mp4".into(),
+            ],
+            cover_url: Some("https://p3.douyinpic.com/cover.jpeg".into()),
+            platform: Platform::Douyin,
+            ..Default::default()
+        };
+        let candidate = media.download_candidate(0).unwrap();
+        assert_eq!(candidate.url, media.video_url.unwrap());
+        assert_eq!(candidate.fallback_urls, media.video_fallback_urls);
+        assert_eq!(candidate.cover_url, media.cover_url);
+        assert_eq!(candidate.kind, MediaKind::Video);
+    }
 
     #[test]
     fn card_falls_back_to_placeholder_title_and_keeps_source() {
@@ -139,6 +180,20 @@ mod tests {
             media.card().image_urls().collect::<Vec<_>>(),
             ["https://cdn.example/1.jpg", "https://cdn.example/2.jpg"]
         );
+    }
+
+    #[test]
+    fn gallery_uses_original_images_without_prepending_a_separate_cover() {
+        let media = MediaInfo {
+            cover_url: Some("https://cdn.example/cover.jpg".into()),
+            images: (1..=3)
+                .map(|i| format!("https://cdn.example/{i}.jpg"))
+                .collect(),
+            ..Default::default()
+        };
+        let card = media.card();
+        assert!(card.is_gallery());
+        assert_eq!(card.image_urls().collect::<Vec<_>>(), media.images);
     }
 
     #[test]
@@ -240,6 +295,31 @@ mod tests {
     }
 
     #[test]
+    fn song_without_a_cover_or_with_extra_pictures_keeps_its_fallback_layout() {
+        for platform in [Platform::Ncm, Platform::QqMusic] {
+            let song = MediaInfo {
+                title: Some("歌曲".into()),
+                platform,
+                ..Default::default()
+            };
+            let card = song.card();
+            assert!(card.metadata().poster.is_none());
+            assert!(!card.is_gallery());
+            assert_eq!(card.body_text(), "歌曲");
+
+            let gallery = MediaInfo {
+                cover_url: Some("https://cdn.example/cover.jpg".into()),
+                images: vec!["https://cdn.example/picture.jpg".into()],
+                ..song
+            };
+            let card = gallery.card();
+            assert!(card.metadata().poster.is_none());
+            assert!(card.is_gallery());
+            assert_eq!(card.image_urls().collect::<Vec<_>>(), gallery.images);
+        }
+    }
+
+    #[test]
     fn video_without_cover_and_galleries_keep_their_existing_layout() {
         let video = MediaInfo {
             is_video: true,
@@ -253,7 +333,8 @@ mod tests {
             ..MediaInfo::default()
         };
         assert!(gallery.card().metadata().poster.is_none());
-        assert_eq!(gallery.card().image_urls().count(), 2);
+        assert_eq!(gallery.card().image_urls().count(), 1);
+        assert!(gallery.card().is_gallery());
     }
 
     #[test]
@@ -268,8 +349,15 @@ mod tests {
             ..MediaInfo::default()
         };
         let card = video.card();
+        assert!(!card.is_gallery());
         assert_eq!(card.metadata().poster.as_ref().unwrap().title, "小红书视频");
         assert_eq!(card.image_urls().collect::<Vec<_>>(), [cover]);
+        let repeated = MediaInfo {
+            images: vec![cover.into(), cover.into()],
+            ..video
+        }
+        .card();
+        assert!(!repeated.is_gallery());
     }
 
     #[test]

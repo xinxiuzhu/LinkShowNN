@@ -39,23 +39,48 @@ pub trait ResolvedContent: Send + Sync + std::fmt::Debug {
 ///
 /// 共享句柄允许克隆结果而无需复制平台响应；消费者只访问行为契约。
 #[derive(Debug, Clone)]
-pub struct Resolved(Arc<dyn ResolvedContent>);
+pub struct Resolved {
+    content: Arc<dyn ResolvedContent>,
+    original_url: Option<String>,
+    show_comments: bool,
+}
 
 impl Resolved {
     pub fn new(content: impl ResolvedContent + 'static) -> Self {
-        Self(Arc::new(content))
+        Self {
+            content: Arc::new(content),
+            original_url: None,
+            show_comments: true,
+        }
+    }
+
+    pub(crate) fn with_original_url(mut self, source: impl Into<String>) -> Self {
+        self.original_url = Some(source.into());
+        self
+    }
+
+    pub(crate) fn with_comments_visible(mut self, enabled: bool) -> Self {
+        self.show_comments = enabled;
+        self
     }
 
     pub fn card(&self) -> Card {
-        self.0.card()
+        let card = self
+            .content
+            .card()
+            .with_comments_visible(self.show_comments);
+        match &self.original_url {
+            Some(source) => card.with_original_url(source.clone()),
+            None => card,
+        }
     }
 
     pub fn filter_text(&self) -> String {
-        self.0.filter_text()
+        self.content.filter_text()
     }
 
     pub fn download_candidate(&self, maximum_duration: u64) -> Option<DownloadCandidate> {
-        self.0.download_candidate(maximum_duration)
+        self.content.download_candidate(maximum_duration)
     }
 
     /// 跳过原因只在确实没有候选时才有意义，这里统一保证该前置条件。
@@ -63,7 +88,7 @@ impl Resolved {
         if self.download_candidate(maximum_duration).is_some() {
             return None;
         }
-        self.0.skip_reason(maximum_duration)
+        self.content.skip_reason(maximum_duration)
     }
 }
 
@@ -84,6 +109,15 @@ mod tests {
 
     #[derive(Debug)]
     struct Clip;
+
+    #[derive(Debug)]
+    struct RichContent(Card);
+
+    impl ResolvedContent for RichContent {
+        fn card(&self) -> Card {
+            self.0.clone()
+        }
+    }
 
     impl ResolvedContent for Clip {
         fn card(&self) -> Card {
@@ -111,6 +145,59 @@ mod tests {
         assert_eq!(resolved.filter_text(), "标题\n正文");
         assert!(resolved.download_candidate(0).is_none());
         assert!(resolved.skip_reason(0).is_none());
+    }
+
+    #[test]
+    fn original_share_link_is_preserved_in_card_metadata_only() {
+        let source = "https://www.xiaohongshu.com/explore/6ac6146a000000001b021019?xsec_token=AbC%2Bdef%2Fghi%3D&xsec_source=pc_share";
+        let content = Resolved::new(Article).with_original_url(source);
+        let card = content.clone().card();
+        assert_eq!(card.metadata().original_url.as_deref(), Some(source));
+        assert_eq!(card.text(), "标题\n正文");
+        assert_eq!(content.filter_text(), "标题\n正文");
+    }
+
+    #[test]
+    fn disabling_comments_removes_rich_content_for_every_platform_but_keeps_statistics() {
+        use crate::resolver::{CardComment, CardCommentEmote, CardMetadata, CardPoster, Platform};
+        for platform in [Platform::Bilibili, Platform::Douyin, Platform::Xiaohongshu] {
+            let card = Card::new().line("原作品文案").with_metadata(CardMetadata {
+                platform: Some(platform),
+                author: Some("原作者".into()),
+                avatar_url: Some("https://cdn.example/author.png".into()),
+                poster: Some(CardPoster {
+                    comment_count: Some(44),
+                    video_quality: Some("720P".into()),
+                    ..Default::default()
+                }),
+                comments: vec![CardComment {
+                    author: "评论者".into(),
+                    text: "评论[表情]".into(),
+                    avatar_url: Some("https://cdn.example/comment.png".into()),
+                    emotes: vec![CardCommentEmote {
+                        text: "[表情]".into(),
+                        url: "https://cdn.example/emote.png".into(),
+                        large: false,
+                    }],
+                    pictures: vec!["https://cdn.example/picture.png".into()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            let shown = Resolved::new(RichContent(card));
+            assert_eq!(shown.card().metadata().comments.len(), 1);
+            let hidden = shown.with_comments_visible(false).card();
+            assert!(hidden.metadata().comments.is_empty());
+            assert_eq!(
+                hidden.metadata().avatar_url.as_deref(),
+                Some("https://cdn.example/author.png")
+            );
+            assert_eq!(
+                hidden.metadata().poster.as_ref().unwrap().comment_count,
+                Some(44)
+            );
+            assert!(hidden.text().contains("清晰度：720P"));
+        }
     }
 
     #[test]
