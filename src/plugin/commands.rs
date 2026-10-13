@@ -19,7 +19,7 @@ impl TriggerHandler for InfoHandler {
     async fn handle(&self, bot: &Bot, _msg: &Message, _data: MatchData) -> Result<()> {
         if self.help {
             bot.send(
-                "LinkShowNN 支持：B站、抖音、快手、小红书、Twitter/X、网易云音乐、QQ音乐、库街区、腾讯频道。\n直接发送链接即可自动解析。\n管理员命令：url状态。\n超管私聊扫码：urlB站登录 / url网易云登录 / urlQQ音乐登录。\n各平台还有登录状态、取消登录和清除登录指令。",
+                "LinkShowNN 支持：B站、抖音、快手、小红书、Twitter/X、网易云音乐、QQ音乐、库街区、腾讯频道。\n直接发送链接即可自动解析。\n管理员命令：url状态 / url评论状态。\n超管全局评论开关：url开启评论 / url关闭评论。\n超管私聊扫码：urlB站登录 / url网易云登录 / urlQQ音乐登录。\n各平台还有登录状态、取消登录和清除登录指令。",
             )
             .await?;
             return Ok(());
@@ -40,6 +40,11 @@ impl TriggerHandler for InfoHandler {
                 "\n解析回复: 图文卡片"
             } else {
                 "\n解析回复: 原图文消息"
+            });
+            report.push_str(if state.config.show_comments {
+                "\n评论展示: 开启"
+            } else {
+                "\n评论展示: 关闭"
             });
             report
         };
@@ -73,6 +78,7 @@ impl LinkShowNN {
             .with_permission(PermissionLevel::GroupAdmin)
             .with_block(true),
         ];
+        commands.extend(crate::config::commands(&self.state));
         commands.extend(crate::auth::commands(&self.state));
         commands
     }

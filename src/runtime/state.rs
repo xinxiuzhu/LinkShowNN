@@ -25,6 +25,7 @@ use crate::{
 #[derive(Default)]
 pub struct RuntimeState {
     pub config: ResolverConfig,
+    pub(crate) config_updates: PluginConfigUpdates,
     pub parser: Option<ParserManager>,
     pub renderer: Option<CardRenderer>,
     pub last_calls: HashMap<String, Instant>,

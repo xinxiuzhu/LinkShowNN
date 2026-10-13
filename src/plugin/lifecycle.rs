@@ -157,6 +157,7 @@ impl Plugin for LinkShowNN {
                 .lock()
                 .map_err(|_| anyhow::anyhow!("resolver state lock poisoned"))?;
             state.config = config.clone();
+            state.config_updates = ctx.config_updates.clone();
             state.parser = Some(parser);
             state.renderer = renderer;
             state.downloads = Some(downloads);
