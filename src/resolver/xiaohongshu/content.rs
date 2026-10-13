@@ -1,7 +1,7 @@
 //! 小红书内容与公开互动信息的展示装配。
 
 use crate::{
-    download::DownloadCandidate,
+    download::{DownloadCandidate, SkipReason},
     resolver::{Card, CardPoster, MediaInfo, ResolvedContent},
 };
 
@@ -23,6 +23,12 @@ impl XiaohongshuContent {
         self.media.author = self.media.author.take().or(other.media.author);
         self.media.avatar_url = self.media.avatar_url.take().or(other.media.avatar_url);
         self.media.published_at = self.media.published_at.or(other.media.published_at);
+        if self.media.is_video && other.media.is_video {
+            self.media.video_duration_seconds = self
+                .media
+                .video_duration_seconds
+                .or(other.media.video_duration_seconds);
+        }
         if self.media.is_video && self.media.video_url.is_none() && other.media.is_video {
             self.media.video_url = other.media.video_url;
             self.media.video_fallback_urls = other.media.video_fallback_urls;
@@ -57,6 +63,7 @@ mod tests {
                 description: Some("移动端补充简介".into()),
                 cover_url: Some("https://sns.example/cover.jpg".into()),
                 video_url: Some("https://sns.example/hevc.mp4".into()),
+                video_duration_seconds: Some(481),
                 video_quality: Some("1080P".into()),
                 quality_notice: Some("移动源提示".into()),
                 ..Default::default()
@@ -77,6 +84,15 @@ mod tests {
             Some("请求 1080P，本次获取 720P")
         );
         assert!(!card.is_gallery());
+        assert!(pc.download_candidate(480).is_none());
+        assert_eq!(
+            pc.skip_reason(480),
+            Some(SkipReason::DurationExceeded {
+                duration: 481,
+                maximum: 480,
+            })
+        );
+        assert!(pc.skip_reason(0).is_none());
     }
 
     #[test]
@@ -135,5 +151,9 @@ impl ResolvedContent for XiaohongshuContent {
 
     fn download_candidate(&self, maximum_duration: u64) -> Option<DownloadCandidate> {
         self.media.download_candidate(maximum_duration)
+    }
+
+    fn skip_reason(&self, maximum_duration: u64) -> Option<SkipReason> {
+        self.media.skip_reason(maximum_duration)
     }
 }

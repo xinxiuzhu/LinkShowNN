@@ -11,7 +11,7 @@ use tracing::{debug, info, warn};
 use crate::delivery;
 use crate::runtime::state::RuntimeState;
 use crate::{
-    download::{DownloadCandidate, DownloadReservation, Downloaded, MediaKind},
+    download::{DownloadCandidate, DownloadReservation, Downloaded, MediaKind, MediaSizeLimit},
     resolver::Resolved,
 };
 
@@ -49,16 +49,7 @@ pub fn schedule(
             "media download skipped: no compatible download candidate"
         );
         let notice = reason?.message();
-        return tasks
-            .try_spawn("media-skip-notice", async move {
-                if let Some(message) =
-                    after_card(wait_for_card, std::future::ready(notice.into())).await
-                    && let Err(error) = target.notify(message).await
-                {
-                    warn!(error = %error, "media download skip notice send failed");
-                }
-            })
-            .then_some(first);
+        return schedule_notice(&tasks, target, wait_for_card, notice).then_some(first);
     };
     let media_kind = match candidate.kind {
         MediaKind::Video => "video",
@@ -67,7 +58,12 @@ pub fn schedule(
     info!(filename = %candidate.filename, media_kind,
         has_separate_audio = candidate.audio_url.is_some(),
         "media download candidate created");
-    let reservation = reserve(state)?;
+    let reservation = match reserve(state) {
+        Ok(reservation) => reservation,
+        Err(notice) => {
+            return schedule_notice(&tasks, target, wait_for_card, notice.into()).then_some(first);
+        }
+    };
     let filename = candidate.filename.clone();
     let stats = state.clone();
     info!(filename = %filename, media_kind, "media download task queued");
@@ -97,7 +93,7 @@ pub fn schedule(
             // on disk, without retaining large Base64 strings behind the gate.
             let sent = match result {
                 Ok(media) => send_media(&target, &candidate, &media, &transport, &delivery_slots).await,
-                Err(error) => target.send_confirmed(failure_notice(&error).into()).await,
+                Err(error) => target.send_confirmed(failure_notice(&error, candidate.kind).into()).await,
             };
             match sent {
                 Ok(()) => info!(filename = %filename, media_kind, "media download result send confirmed"),
@@ -116,6 +112,22 @@ pub fn schedule(
                 "media delivery cancelled: card send was not confirmed");
         }
     }).then_some(first)
+}
+
+fn schedule_notice(
+    tasks: &Arc<PluginTaskScope>,
+    target: delivery::ReplyTarget,
+    wait_for_card: tokio::sync::oneshot::Receiver<()>,
+    notice: String,
+) -> bool {
+    tasks.try_spawn("media-skip-notice", async move {
+        if let Some(notice) = after_card(wait_for_card, std::future::ready(notice)).await {
+            info!(reason = %notice, "card send confirmed, sending media skip reason");
+            if let Err(error) = target.send_confirmed(notice.into()).await {
+                warn!(error = %error, "media download skip notice send failed");
+            }
+        }
+    })
 }
 
 /// The same receipt-bearing path handles video and MP3 voice. Unknown outcomes
@@ -184,29 +196,42 @@ async fn after_card<T>(
     .map(|(_, result)| result)
 }
 
-fn reserve(state: &Arc<Mutex<RuntimeState>>) -> Option<DownloadReservation> {
-    let mut guard = state.lock().ok()?;
+fn reserve(
+    state: &Arc<Mutex<RuntimeState>>,
+) -> std::result::Result<DownloadReservation, &'static str> {
+    let mut guard = state
+        .lock()
+        .map_err(|_| "媒体下载状态不可用，已跳过下载，仅发送图文。")?;
     guard.metrics.candidate();
     let Some(manager) = guard.downloads.clone() else {
         guard.metrics.skip(None);
         warn!("media download skipped: download manager is not loaded");
-        return None;
+        return Err("媒体下载器未就绪，已跳过下载，仅发送图文。");
     };
     let Some(reservation) = manager.try_reserve() else {
         guard.metrics.skip(None);
         warn!("media download skipped: download queue is full");
-        return None;
+        return Err("媒体下载队列已满，已跳过下载，仅发送图文。");
     };
     guard.metrics.queue();
-    Some(reservation)
+    Ok(reservation)
 }
 
 /// 体积超限是配置可调的，单独提示；其余归为通用失败。
-fn failure_notice(error: &anyhow::Error) -> &'static str {
-    if error.to_string().contains("exceeds configured size limit") {
-        "媒体文件体积超过上限，已放弃发送媒体。"
+fn failure_notice(error: &anyhow::Error, kind: MediaKind) -> String {
+    let name = match kind {
+        MediaKind::Video => "视频",
+        MediaKind::Audio => "音频",
+    };
+    if let Some(limit) = error.downcast_ref::<MediaSizeLimit>() {
+        let maximum = if limit.maximum_bytes % (1024 * 1024) == 0 {
+            format!("{} MB", limit.maximum_bytes / (1024 * 1024))
+        } else {
+            format!("{} 字节", limit.maximum_bytes)
+        };
+        format!("{name}文件大小超过配置上限（{maximum}），已停止下载，仅发送图文。")
     } else {
-        "媒体下载失败，已放弃发送媒体。"
+        format!("{name}下载失败，已放弃发送{name}。")
     }
 }
 

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use nuono_plugin::prelude::*;
 use tokio::sync::Semaphore;
 use tracing::debug;
@@ -167,10 +167,97 @@ impl Plugin for LinkShowNN {
             state.bili_login = Some(login);
             state.ncm_login = Some(ncm_login);
             state.qqmusic_login = Some(qqmusic_login);
+            self.data_dir = Some(ctx.data_dir.clone());
         }
         self.limiter.close();
         self.limiter = Arc::new(Semaphore::new(config.concurrent_limit));
         live::start_polling(&self.state).await
+    }
+
+    async fn on_config_changed(&mut self, value: &serde_json::Value) -> Result<()> {
+        let config = ResolverConfig::load(value.clone())?;
+        let data_dir = self.data_dir.as_ref().context("resolver is not loaded")?;
+        let mutations = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("resolver state lock poisoned"))?
+            .auth_mutations
+            .clone();
+        // Account controllers rebuild the same parser. Read their latest
+        // sessions only after acquiring the shared mutation lock, and keep it
+        // through publication so a login cannot restore an older config.
+        let _mutation = mutations.lock().await;
+        let (sessions, tasks, poller, restart_live) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("resolver state lock poisoned"))?;
+            let sessions = state
+                .parser
+                .as_ref()
+                .context("resolver parser is not loaded")?
+                .session_cookies();
+            let tasks = state
+                .tasks
+                .clone()
+                .context("resolver tasks are not loaded")?;
+            ensure!(!tasks.is_closed(), "resolver task scope is closed");
+            let previous = &state.config;
+            (
+                sessions,
+                tasks,
+                state.live_poller.clone(),
+                previous.live_enabled != config.live_enabled
+                    || previous.live_poll_interval != config.live_poll_interval
+                    || previous.proxy != config.proxy
+                    || previous.bili_cookie != config.bili_cookie,
+            )
+        };
+
+        // Build every fallible candidate before publishing anything. Running
+        // downloads keep their old manager; new requests use this new snapshot.
+        let parser = ParserManager::with_sessions(config.clone(), sessions)?;
+        let renderer = config
+            .render_cards
+            .then(|| CardRenderer::new(&config.proxy, tasks.clone()))
+            .transpose()?;
+        let downloads = DownloadManager::new(
+            (!config.proxy.trim().is_empty()).then_some(config.proxy.as_str()),
+            config.download_concurrent_limit,
+            config.download_queue_limit,
+            config.video_max_mb,
+            config.resolve_media_dir(data_dir),
+        )?;
+        let limiter = Arc::new(Semaphore::new(config.concurrent_limit));
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("resolver state lock poisoned"))?;
+            ensure!(!tasks.is_closed(), "resolver task scope is closed");
+            state.config = config.clone();
+            state.parser = Some(parser);
+            state.renderer = renderer;
+            state.downloads = Some(downloads);
+            // Preserve the delivery semaphore and the original task scope,
+            // controllers, subscriptions and counters across config changes.
+            self.limiter = limiter;
+        }
+        if restart_live {
+            // start_polling alone does not stop a poller when live is disabled.
+            // Cancel only that worker, never the shared plugin task scope.
+            poller.stop().await;
+            live::start_polling(&self.state).await?;
+        }
+        // QR controllers retain their HTTP clients until plugin reload;
+        // refreshing settings must not cancel an ongoing login attempt.
+        debug!(
+            enable_media_download = config.enable_media_download,
+            video_duration_maximum = config.video_duration_maximum,
+            video_max_mb = config.video_max_mb,
+            "URL 解析器运行配置已更新"
+        );
+        Ok(())
     }
 
     async fn on_enable(&mut self) -> Result<()> {
@@ -211,3 +298,6 @@ impl Plugin for LinkShowNN {
         ResolverConfig::get_schema()
     }
 }
+
+#[cfg(test)]
+mod tests;

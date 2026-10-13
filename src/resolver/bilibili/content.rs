@@ -168,6 +168,9 @@ impl ResolvedContent for VideoContent {
     }
 
     fn skip_reason(&self, maximum_duration: u64) -> Option<SkipReason> {
+        if self.download_candidate(maximum_duration).is_some() {
+            return None;
+        }
         if self.exceeds(maximum_duration) {
             return Some(SkipReason::DurationExceeded {
                 duration: self.duration(),
@@ -354,6 +357,7 @@ mod tests {
         };
         let content = VideoContent(info);
         let candidate = content.download_candidate(100).unwrap();
+        assert!(content.skip_reason(100).is_none());
         assert_eq!(candidate.url, "https://cdn.example/v.mp4");
         assert_eq!(candidate.fallback_urls, ["https://backup.example/v.mp4"]);
         assert!(candidate.audio_url.is_none());

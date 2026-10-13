@@ -28,8 +28,11 @@ const MAX_MEDIA_SOURCES: usize = 3;
 
 /// A size limit is terminal: another source must not circumvent the user's budget.
 #[derive(Debug, thiserror::Error)]
-#[error("media exceeds configured size limit")]
-struct MediaSizeLimit;
+#[error("media exceeds configured size limit ({observed_bytes} > {maximum_bytes} bytes)")]
+pub(crate) struct MediaSizeLimit {
+    pub(crate) observed_bytes: u64,
+    pub(crate) maximum_bytes: u64,
+}
 
 #[derive(Clone)]
 pub struct DownloadManager {
@@ -149,10 +152,15 @@ impl DownloadManager {
             .await?;
         self.mux_with_ffmpeg(video.path(), audio.path(), output.path())
             .await?;
-        if let Some(max_bytes) = self.max_bytes
-            && tokio::fs::metadata(output.path()).await?.len() > max_bytes
-        {
-            return Err(MediaSizeLimit.into());
+        if let Some(max_bytes) = self.max_bytes {
+            let size = tokio::fs::metadata(output.path()).await?.len();
+            if size > max_bytes {
+                return Err(MediaSizeLimit {
+                    observed_bytes: size,
+                    maximum_bytes: max_bytes,
+                }
+                .into());
+            }
         }
         Ok(output)
     }
@@ -200,11 +208,14 @@ impl DownloadManager {
         validate_public_url(&url)?;
         let response = self.fetch_public(url, referer).await?;
         if let Some(max_bytes) = self.max_bytes
-            && response
-                .content_length()
-                .is_some_and(|size| size > max_bytes)
+            && let Some(size) = response.content_length()
+            && size > max_bytes
         {
-            return Err(MediaSizeLimit.into());
+            return Err(MediaSizeLimit {
+                observed_bytes: size,
+                maximum_bytes: max_bytes,
+            }
+            .into());
         }
         if response
             .headers()
@@ -227,8 +238,14 @@ impl DownloadManager {
         while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
             total = total.saturating_add(chunk.len() as u64);
-            if self.max_bytes.is_some_and(|max_bytes| total > max_bytes) {
-                return Err(MediaSizeLimit.into());
+            if let Some(max_bytes) = self.max_bytes
+                && total > max_bytes
+            {
+                return Err(MediaSizeLimit {
+                    observed_bytes: total,
+                    maximum_bytes: max_bytes,
+                }
+                .into());
             }
             file.write_all(&chunk).await?;
         }

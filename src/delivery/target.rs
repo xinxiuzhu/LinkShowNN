@@ -175,13 +175,6 @@ impl ReplyTarget {
             "onebot" | "onebot v11" | "onebot_v11"
         )
     }
-
-    pub(crate) async fn notify(&self, message: SendableMessage) -> anyhow::Result<()> {
-        self.bot
-            .notify_routed(&self.target.route, self.action(message)?)
-            .await?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

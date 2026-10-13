@@ -107,11 +107,9 @@ impl SkipReason {
     pub fn message(&self) -> String {
         match self {
             Self::DurationExceeded { duration, maximum } => {
-                format!("视频时长 {duration} 秒超过上限 {maximum} 秒，已跳过下载，仅发送信息卡片。")
+                format!("视频时长 {duration} 秒超过配置上限 {maximum} 秒，已跳过下载。")
             }
-            Self::NoPlayableStream => {
-                "未获取到可用的音视频流，已跳过下载，仅发送信息卡片。".to_string()
-            }
+            Self::NoPlayableStream => "未获取到可用的音视频流，已跳过下载。".to_string(),
         }
     }
 }

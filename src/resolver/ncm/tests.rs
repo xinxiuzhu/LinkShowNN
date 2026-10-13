@@ -58,6 +58,9 @@ fn preview_is_named_and_shown_as_preview() {
         content.download_candidate(0).unwrap().filename,
         "ncm_109125_preview.mp3"
     );
+    // 试听仍是可播放音频，视频限时不拦歌曲或生成额外跳过通知。
+    assert!(content.download_candidate(1).is_some());
+    assert!(content.skip_reason(1).is_none());
 }
 
 #[test]
@@ -127,6 +130,10 @@ fn unavailable_and_mismatched_sources_keep_public_song_card() {
         let content = map_song(&song(), audio.as_ref(), &source());
         assert_eq!(content.media.title.as_deref(), Some("夏天"));
         assert!(content.download_candidate(0).is_none());
+        assert_eq!(
+            content.skip_reason(0),
+            Some(crate::download::SkipReason::NoPlayableStream)
+        );
         assert!(content.card().text().contains("暂未取得可用音源"));
     }
 }

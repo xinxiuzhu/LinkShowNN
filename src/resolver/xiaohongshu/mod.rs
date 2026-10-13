@@ -229,6 +229,7 @@ fn map_content(
             media.video_url = candidates.next();
             media.video_fallback_urls = candidates.collect();
             media.is_video = true;
+            media.video_duration_seconds = video_duration_seconds(note.get("video"));
             // 视频 imageList 是封面尺寸，不应作为图集另外发送。
             media.images.clear();
             ensure!(
@@ -245,6 +246,32 @@ fn map_content(
         _ => bail!("小红书笔记类型未知或内容不完整"),
     }
     Ok(XiaohongshuContent { media, engagement })
+}
+
+fn video_duration_seconds(video: Option<&Value>) -> Option<u64> {
+    let video = video?;
+    // media.video.duration 是秒；编码流的 videoDuration/duration 是毫秒。
+    // capa.duration 可能向下舍入，audioDuration 属于音轨，均不作为视频限时依据。
+    if let Some(seconds) = video
+        .pointer("/media/video/duration")
+        .and_then(Value::as_u64)
+        .filter(|duration| *duration > 0)
+    {
+        return Some(seconds);
+    }
+    ["h264", "h265"]
+        .into_iter()
+        .filter_map(|codec| video.pointer("/media/stream")?.get(codec)?.as_array())
+        .flatten()
+        .find_map(|stream| {
+            ["videoDuration", "duration"].into_iter().find_map(|key| {
+                stream
+                    .get(key)
+                    .and_then(Value::as_u64)
+                    .filter(|duration| *duration > 0)
+            })
+        })
+        .map(|milliseconds| milliseconds.div_ceil(1000))
 }
 
 #[cfg(test)]
@@ -346,6 +373,30 @@ mod tests {
     }
 
     #[test]
+    fn known_video_duration_maps_seconds_and_stream_milliseconds_before_limiting() {
+        for duration in [
+            serde_json::json!({"video": {"duration": 481}}),
+            serde_json::json!({"stream": {"h264": [{"videoDuration": 480001}]}}),
+            serde_json::json!({"stream": {"h265": [{"duration": 480001}]}}),
+        ] {
+            let mut value = note("video");
+            value["video"]["media"] = duration;
+            let media = map_page(&page(serde_json::json!({"note": value})), Some(NOTE_ID)).unwrap();
+            assert_eq!(media.video_duration_seconds, Some(481));
+            assert!(media.download_candidate(480).is_none());
+            assert_eq!(
+                media.skip_reason(480),
+                Some(crate::download::SkipReason::DurationExceeded {
+                    duration: 481,
+                    maximum: 480,
+                })
+            );
+            assert!(media.download_candidate(481).is_some());
+            assert!(media.skip_reason(481).is_none());
+        }
+    }
+
+    #[test]
     fn originals_and_backups_reach_the_download_candidate() {
         let mut value = note("video");
         value["video"] = serde_json::json!({
@@ -366,7 +417,9 @@ mod tests {
 
     #[test]
     fn normal_note_does_not_download_nested_soundtrack_or_og_video() {
-        let mut input = page(serde_json::json!({"note": note("normal")}));
+        let mut value = note("normal");
+        value["video"]["media"] = serde_json::json!({"video": {"duration": 900}});
+        let mut input = page(serde_json::json!({"note": value}));
         input
             .html
             .push_str(r#"<meta property="og:video" content="https://sns.example/stale.mp4">"#);
@@ -382,6 +435,8 @@ mod tests {
         assert!(media.video_fallback_urls.is_empty());
         assert!(!media.is_video);
         assert!(media.download_candidate(0).is_none());
+        assert!(media.video_duration_seconds.is_none());
+        assert!(media.skip_reason(480).is_none());
         assert!(media.card().is_gallery());
     }
 
@@ -413,6 +468,10 @@ mod tests {
         let media = map_page(&page(serde_json::json!({"note": value})), Some(NOTE_ID)).unwrap();
         assert!(media.is_video);
         assert!(media.download_candidate(0).is_none());
+        assert_eq!(
+            media.skip_reason(0),
+            Some(crate::download::SkipReason::NoPlayableStream)
+        );
         assert!(media.card().metadata().poster.is_some());
     }
 

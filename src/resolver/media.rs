@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{Card, CardMetadata, CardPoster, Platform, ResolvedContent};
-use crate::download::DownloadCandidate;
+use crate::download::{DownloadCandidate, SkipReason};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MediaInfo {
@@ -30,6 +30,9 @@ pub struct MediaInfo {
     /// 即使暂时取不到播放地址，视频作品也可以生成封面海报。
     #[serde(default)]
     pub is_video: bool,
+    /// 已知视频时长，单位秒；平台 mapper 负责转换，不把歌曲或图集音轨时长放在这里。
+    #[serde(default)]
+    pub video_duration_seconds: Option<u64>,
     #[serde(default)]
     pub video_quality: Option<String>,
     #[serde(default)]
@@ -38,6 +41,16 @@ pub struct MediaInfo {
     /// 解析出该媒体的平台，下载阶段据此决定 CDN Referer。
     pub platform: Platform,
     pub raw: Value,
+}
+
+impl MediaInfo {
+    fn exceeded_video_duration(&self, maximum_duration: u64) -> Option<u64> {
+        self.video_duration_seconds.filter(|duration| {
+            (self.is_video || self.video_url.is_some())
+                && maximum_duration > 0
+                && *duration > maximum_duration
+        })
+    }
 }
 
 impl ResolvedContent for MediaInfo {
@@ -114,9 +127,16 @@ impl ResolvedContent for MediaInfo {
         )
     }
 
-    fn download_candidate(&self, _maximum_duration: u64) -> Option<DownloadCandidate> {
+    fn download_candidate(&self, maximum_duration: u64) -> Option<DownloadCandidate> {
+        if self.exceeded_video_duration(maximum_duration).is_some() {
+            return None;
+        }
         let referer = self.platform.media_referer();
-        if let Some(url) = self.video_url.as_deref() {
+        if let Some(url) = self
+            .video_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+        {
             return Some(
                 DownloadCandidate::video(url, "linkshownn_video.mp4", referer)
                     .with_fallback_urls(self.video_fallback_urls.clone())
@@ -125,14 +145,33 @@ impl ResolvedContent for MediaInfo {
         }
         self.audio_url
             .as_deref()
+            .filter(|url| !url.trim().is_empty())
             .map(|url| DownloadCandidate::audio(url, "linkshownn_audio.mp3", referer))
+    }
+
+    fn skip_reason(&self, maximum_duration: u64) -> Option<SkipReason> {
+        if self.download_candidate(maximum_duration).is_some() {
+            return None;
+        }
+        if let Some(duration) = self.exceeded_video_duration(maximum_duration) {
+            return Some(SkipReason::DurationExceeded {
+                duration,
+                maximum: maximum_duration,
+            });
+        }
+        // 普通文章和原图集没有独立音视频，不因缺少播放流而额外提示。
+        (self.is_video
+            || self.video_url.is_some()
+            || self.audio_url.is_some()
+            || matches!(self.platform, Platform::Ncm | Platform::QqMusic))
+        .then_some(SkipReason::NoPlayableStream)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::MediaInfo;
-    use crate::download::model::MediaKind;
+    use crate::download::model::{MediaKind, SkipReason};
     use crate::resolver::{Platform, ResolvedContent};
 
     #[test]
@@ -217,6 +256,85 @@ mod tests {
             ..MediaInfo::default()
         };
         assert_eq!(media.download_candidate(0).unwrap().kind, MediaKind::Audio);
+    }
+
+    #[test]
+    fn known_video_duration_is_limited_with_an_explicit_reason() {
+        let media = MediaInfo {
+            is_video: true,
+            video_duration_seconds: Some(481),
+            video_url: Some("https://cdn.example/v.mp4".into()),
+            ..Default::default()
+        };
+        assert!(media.download_candidate(480).is_none());
+        assert_eq!(
+            media.skip_reason(480),
+            Some(SkipReason::DurationExceeded {
+                duration: 481,
+                maximum: 480,
+            })
+        );
+        for maximum in [0, 481, 600] {
+            assert!(media.download_candidate(maximum).is_some());
+            assert!(media.skip_reason(maximum).is_none());
+        }
+        let unknown = MediaInfo {
+            video_duration_seconds: None,
+            ..media
+        };
+        assert!(unknown.download_candidate(1).is_some());
+        assert!(unknown.skip_reason(1).is_none());
+    }
+
+    #[test]
+    fn missing_streams_are_explained_only_for_audio_or_video_content() {
+        let video = MediaInfo {
+            is_video: true,
+            video_duration_seconds: Some(900),
+            ..Default::default()
+        };
+        assert_eq!(
+            video.skip_reason(480),
+            Some(SkipReason::DurationExceeded {
+                duration: 900,
+                maximum: 480,
+            })
+        );
+        assert_eq!(video.skip_reason(0), Some(SkipReason::NoPlayableStream));
+        assert_eq!(
+            MediaInfo {
+                video_url: Some(" ".into()),
+                ..Default::default()
+            }
+            .skip_reason(0),
+            Some(SkipReason::NoPlayableStream)
+        );
+        for media in [
+            MediaInfo::default(),
+            MediaInfo {
+                images: vec!["https://cdn.example/image.jpg".into()],
+                ..Default::default()
+            },
+        ] {
+            assert!(media.download_candidate(480).is_none());
+            assert!(media.skip_reason(480).is_none());
+        }
+        let song = MediaInfo {
+            platform: Platform::Ncm,
+            audio_url: Some("https://cdn.example/song.mp3".into()),
+            video_duration_seconds: Some(900),
+            ..Default::default()
+        };
+        assert!(song.download_candidate(480).is_some());
+        assert!(song.skip_reason(480).is_none());
+        assert_eq!(
+            MediaInfo {
+                audio_url: None,
+                ..song
+            }
+            .skip_reason(480),
+            Some(SkipReason::NoPlayableStream)
+        );
     }
 
     #[test]

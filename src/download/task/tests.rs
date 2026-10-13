@@ -123,7 +123,7 @@ impl Rig {
         let (done, completed) = oneshot::channel();
         assert!(self.tasks.try_spawn("test-download", async move {
             let sent = if let Some(message) = after_card(wait_for_card, work).await {
-                target.notify(message).await.unwrap();
+                target.send_confirmed(message).await.unwrap();
                 true
             } else {
                 false
@@ -146,6 +146,14 @@ fn video(name: &str) -> SendableMessage {
 
 fn poster() -> SendableMessage {
     vec![MessageSegment::image("base64://test-card")].into()
+}
+
+async fn confirm_followup(rig: &mut Rig, completed: oneshot::Receiver<bool>) -> Value {
+    let call = bounded(rig.calls.recv()).await.unwrap();
+    call.receipt.send(Ok(Value::Null)).unwrap();
+    assert!(bounded(completed).await.unwrap());
+    assert!(rig.notifications.try_recv().is_err());
+    call.action
 }
 
 fn gallery(total: usize) -> delivery::GalleryDelivery {
@@ -199,11 +207,8 @@ async fn ready_video_waits_for_direct_gallery_or_forward_receipt() {
         assert!(rig.notifications.try_recv().is_err());
         call.receipt.send(Ok(Value::Null)).unwrap();
         bounded(sending).await.unwrap().unwrap();
-        assert!(bounded(completed).await.unwrap());
-        assert_eq!(
-            bounded(rig.notifications.recv()).await.unwrap()["params"]["message"][0]["type"],
-            "video"
-        );
+        let sent = confirm_followup(&mut rig, completed).await;
+        assert_eq!(sent["params"]["message"][0]["type"], "video");
         rig.tasks.shutdown().await;
     }
 }
@@ -248,8 +253,7 @@ async fn finished_download_waits_for_card_receipt_and_preserves_reply_context() 
     // a native message ID. Async/unknown raw envelopes are checked separately.
     call.receipt.send(Ok(Value::Null)).unwrap();
     bounded(card).await.unwrap().unwrap();
-    assert!(bounded(completed).await.unwrap());
-    let sent = bounded(rig.notifications.recv()).await.unwrap();
+    let sent = confirm_followup(&mut rig, completed).await;
     assert_eq!(sent["params"]["message"][0]["type"], "video");
     for action in [&call.action, &sent] {
         assert_eq!(action["params"]["group_id"], "000-group-openid");
@@ -282,8 +286,7 @@ async fn ready_mp3_is_sent_as_record_only_after_card_receipt() {
     assert!(rig.notifications.try_recv().is_err());
     call.receipt.send(Ok(Value::Null)).unwrap();
     bounded(sending).await.unwrap().unwrap();
-    assert!(bounded(completed).await.unwrap());
-    let sent = bounded(rig.notifications.recv()).await.unwrap();
+    let sent = confirm_followup(&mut rig, completed).await;
     assert_eq!(sent["params"]["message"][0]["type"], "record");
     assert_eq!(
         sent["params"]["message"][0]["data"]["file"],
@@ -507,11 +510,8 @@ async fn card_receipt_does_not_wait_for_slow_download() {
     bounded(card).await.unwrap().unwrap();
     assert!(rig.notifications.try_recv().is_err());
     assert!(download.send(video("slow")).is_ok());
-    assert!(bounded(completed).await.unwrap());
-    assert_eq!(
-        bounded(rig.notifications.recv()).await.unwrap()["params"]["message"][0]["type"],
-        "video"
-    );
+    let sent = confirm_followup(&mut rig, completed).await;
+    assert_eq!(sent["params"]["message"][0]["type"], "video");
     rig.tasks.shutdown().await;
 }
 
@@ -603,8 +603,7 @@ async fn each_request_has_its_own_card_gate() {
         .send(Ok(json!({"message_id":"poster-b"})))
         .unwrap();
     bounded(card_b).await.unwrap().unwrap();
-    assert!(bounded(completed_b).await.unwrap());
-    let sent_b = bounded(rig.notifications.recv()).await.unwrap();
+    let sent_b = confirm_followup(&mut rig, completed_b).await;
     assert_eq!(sent_b["params"]["message_id"], "request-b");
     assert_eq!(
         sent_b["params"]["message"][0]["data"]["file"],
@@ -616,8 +615,7 @@ async fn each_request_has_its_own_card_gate() {
         .send(Ok(json!({"message_id":"poster-a"})))
         .unwrap();
     bounded(card_a).await.unwrap().unwrap();
-    assert!(bounded(completed_a).await.unwrap());
-    let sent_a = bounded(rig.notifications.recv()).await.unwrap();
+    let sent_a = confirm_followup(&mut rig, completed_a).await;
     assert_eq!(sent_a["params"]["message_id"], "request-a");
     assert_eq!(
         sent_a["params"]["message"][0]["data"]["file"],
@@ -685,8 +683,7 @@ async fn nested_reply_ids_are_preserved_on_card_and_video() {
         .send(Ok(json!({"message_id":"poster"})))
         .unwrap();
     bounded(card).await.unwrap().unwrap();
-    assert!(bounded(completed).await.unwrap());
-    let sent = bounded(rig.notifications.recv()).await.unwrap();
+    let sent = confirm_followup(&mut rig, completed).await;
     for action in [&call.action, &sent] {
         assert_eq!(action["params"]["group_id"], "000-group-openid");
         assert_eq!(action["params"]["group_openid"], "000-group-openid");
@@ -700,11 +697,26 @@ async fn nested_reply_ids_are_preserved_on_card_and_video() {
 
 #[test]
 fn size_limit_failure_gets_its_own_notice() {
-    let oversize = anyhow::anyhow!("file exceeds configured size limit of 100 MiB");
+    let oversize = anyhow::Error::new(MediaSizeLimit {
+        observed_bytes: 101 * 1024 * 1024,
+        maximum_bytes: 100 * 1024 * 1024,
+    })
+    .context("media preparation failed");
     assert_eq!(
-        failure_notice(&oversize),
-        "媒体文件体积超过上限，已放弃发送媒体。"
+        failure_notice(&oversize, MediaKind::Video),
+        "视频文件大小超过配置上限（100 MB），已停止下载，仅发送图文。"
     );
     let other = anyhow::anyhow!("connection reset by peer");
-    assert_eq!(failure_notice(&other), "媒体下载失败，已放弃发送媒体。");
+    assert_eq!(
+        failure_notice(&other, MediaKind::Audio),
+        "音频下载失败，已放弃发送音频。"
+    );
+    // Arbitrary error strings must not be mistaken for the downloader's limit.
+    let untyped = anyhow::anyhow!("upstream says exceeds configured size limit");
+    assert_eq!(
+        failure_notice(&untyped, MediaKind::Video),
+        "视频下载失败，已放弃发送视频。"
+    );
 }
+
+mod schedule;

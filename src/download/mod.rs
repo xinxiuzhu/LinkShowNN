@@ -6,5 +6,6 @@ mod manager;
 pub mod model;
 pub mod task;
 
+pub(crate) use manager::MediaSizeLimit;
 pub use manager::{DownloadManager, DownloadReservation};
 pub use model::{DownloadCandidate, Downloaded, MediaKind, SkipReason};

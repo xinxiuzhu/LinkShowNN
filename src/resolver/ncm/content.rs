@@ -2,7 +2,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::{
-    download::DownloadCandidate,
+    download::{DownloadCandidate, SkipReason},
     resolver::{Card, MediaInfo, Platform, ResolvedContent},
 };
 
@@ -24,6 +24,12 @@ impl ResolvedContent for NcmSong {
             .audio_url
             .as_ref()
             .map(|url| DownloadCandidate::audio(url, &self.filename, Platform::Ncm.media_referer()))
+    }
+
+    fn skip_reason(&self, _maximum_duration: u64) -> Option<SkipReason> {
+        self.download_candidate(0)
+            .is_none()
+            .then_some(SkipReason::NoPlayableStream)
     }
 }
 

@@ -7,7 +7,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::{
-    download::DownloadCandidate,
+    download::{DownloadCandidate, SkipReason},
     resolver::{
         Card, CardComment, CardPoster, CardPublicDetails, MediaInfo, ResolvedContent, url_policy,
     },
@@ -277,6 +277,10 @@ impl ResolvedContent for DouyinContent {
         }
         Some(candidate)
     }
+
+    fn skip_reason(&self, maximum_duration: u64) -> Option<SkipReason> {
+        self.media.skip_reason(maximum_duration)
+    }
 }
 
 #[cfg(test)]
@@ -289,6 +293,26 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/douyin-engagement.html"
     ));
+
+    #[test]
+    fn video_limit_reason_survives_the_engagement_wrapper() {
+        let content = DouyinContent::new(MediaInfo {
+            is_video: true,
+            video_url: Some("https://v26.douyinvod.com/video.mp4".into()),
+            video_duration_seconds: Some(481),
+            ..Default::default()
+        });
+        assert!(content.download_candidate(480).is_none());
+        assert_eq!(
+            content.skip_reason(480),
+            Some(SkipReason::DurationExceeded {
+                duration: 481,
+                maximum: 480,
+            })
+        );
+        assert!(content.download_candidate(0).is_some());
+        assert!(content.skip_reason(0).is_none());
+    }
 
     fn dom() -> Engagement {
         desktop::map_engagement(

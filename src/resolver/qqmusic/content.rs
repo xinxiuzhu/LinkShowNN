@@ -1,5 +1,5 @@
 use crate::{
-    download::DownloadCandidate,
+    download::{DownloadCandidate, SkipReason},
     resolver::{Card, MediaInfo, ResolvedContent},
 };
 
@@ -63,6 +63,12 @@ impl ResolvedContent for QqSong {
             .with_cover(self.media.cover_url.clone())
         })
     }
+
+    fn skip_reason(&self, _maximum_duration: u64) -> Option<SkipReason> {
+        self.download_candidate(0)
+            .is_none()
+            .then_some(SkipReason::NoPlayableStream)
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +114,9 @@ mod tests {
         assert_eq!(poster.cover_url, song.media.cover_url);
         assert!(card.metadata().video_cover_url.is_none());
         assert!(!card.is_gallery());
+        // 视频时长限制不限制歌曲；已有音源也不会产生跳过说明。
+        assert!(song.download_candidate(1).is_some());
+        assert!(song.skip_reason(1).is_none());
     }
 
     #[test]
@@ -126,6 +135,7 @@ mod tests {
         );
         assert!(card.text().ends_with(song.notice.as_deref().unwrap()));
         assert!(song.download_candidate(0).is_none());
+        assert_eq!(song.skip_reason(0), Some(SkipReason::NoPlayableStream));
         assert!(card.metadata().avatar_url.is_none());
         assert!(card.metadata().published_at.is_none());
     }

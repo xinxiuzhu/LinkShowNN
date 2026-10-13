@@ -459,6 +459,22 @@ pub(super) fn map_detail_with_quality(
             .and_then(Value::as_i64)
             .filter(|time| *time > 0),
         is_video,
+        // Aweme 的 video.duration 和顶层 duration 均为毫秒；不读取 music.duration。
+        video_duration_seconds: is_video
+            .then(|| {
+                video
+                    .and_then(|video| video.get("duration"))
+                    .and_then(Value::as_u64)
+                    .filter(|duration| *duration > 0)
+                    .or_else(|| {
+                        detail
+                            .get("duration")
+                            .and_then(Value::as_u64)
+                            .filter(|duration| *duration > 0)
+                    })
+                    .map(|milliseconds| milliseconds.div_ceil(1000))
+            })
+            .flatten(),
         source_url: source_url.to_string(),
         platform: Platform::Douyin,
         raw: json!({"platform": "douyin", "aweme_id": detail.get("aweme_id"), "statistics": {
@@ -483,6 +499,45 @@ fn cookie_value(cookie: &str, name: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::resolver::content::ResolvedContent;
+
+    #[test]
+    fn aweme_video_milliseconds_limit_media_without_using_soundtrack_duration() {
+        let source = Url::parse("https://www.douyin.com/video/123").unwrap();
+        for detail in [
+            json!({"video": {"duration": 480001, "play_addr": {"uri": "v_actual"}}}),
+            json!({"duration": 480001, "video": {"play_addr": {"uri": "v_actual"}}}),
+        ] {
+            let media = map_detail(&detail, &source);
+            assert_eq!(media.video_duration_seconds, Some(481));
+            assert!(media.download_candidate(480).is_none());
+            assert_eq!(
+                media.skip_reason(480),
+                Some(crate::download::SkipReason::DurationExceeded {
+                    duration: 481,
+                    maximum: 480,
+                })
+            );
+            assert!(media.download_candidate(481).is_some());
+            assert!(media.skip_reason(481).is_none());
+        }
+        let unknown = map_detail(
+            &json!({"video": {"play_addr": {"uri": "v_actual"}}, "music": {"duration": 900000}}),
+            &source,
+        );
+        assert!(unknown.video_duration_seconds.is_none());
+        assert!(unknown.download_candidate(1).is_some());
+        let gallery = map_detail(
+            &json!({
+                "images": [{"url_list": ["https://p3.douyinpic.com/image.jpeg"]}],
+                "video": {"duration": 900000, "play_addr": {"uri": "v_soundtrack"}},
+                "duration": 900000
+            }),
+            &source,
+        );
+        assert!(gallery.video_duration_seconds.is_none());
+        assert!(gallery.download_candidate(480).is_none());
+        assert!(gallery.skip_reason(480).is_none());
+    }
 
     #[test]
     fn client_and_detail_mapper_apply_the_preferred_quality() {
